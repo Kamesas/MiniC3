@@ -41,6 +41,14 @@ public:
     // comes back, it reflects how warm/cold it is.
     void setMoodFromTemperature(float temp);
 
+    // Turn the OLED panel off (low-power mode). The display stays dark
+    // and the chip stops driving its rows, which extends the panel's
+    // lifetime and avoids burn-in. The frame buffer in RAM is preserved.
+    void sleep();
+
+    // Turn the OLED panel back on. Pair with sleep().
+    void wake();
+
 // Everything below "private:" is internal to the class - other files
 // can't touch it. This keeps the public surface small and tidy.
 private:

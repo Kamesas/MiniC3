@@ -167,6 +167,14 @@ void Eyes::update() {
     drawFace();
 }
 
+void Eyes::sleep() {
+    u8g2.setPowerSave(1);
+}
+
+void Eyes::wake() {
+    u8g2.setPowerSave(0);
+}
+
 void Eyes::showTemperature(float temp, float humidity) {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_logisoso24_tr);
