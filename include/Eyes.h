@@ -55,6 +55,10 @@ public:
     // characters fit comfortably.
     void setClock(const char* hhmm);
 
+    // Human-readable name of the current mood ("Normal", "Happy", etc.).
+    // Used by the web dashboard for display.
+    const char* getMoodName() const;
+
 // Everything below "private:" is internal to the class - other files
 // can't touch it. This keeps the public surface small and tidy.
 private:

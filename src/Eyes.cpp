@@ -196,6 +196,16 @@ void Eyes::setClock(const char* hhmm) {
     clockText[sizeof(clockText) - 1] = '\0';
 }
 
+const char* Eyes::getMoodName() const {
+    switch (currentMood) {
+        case Normal:    return "Normal";
+        case Happy:     return "Happy";
+        case Sleepy:    return "Sleepy";
+        case Surprised: return "Surprised";
+    }
+    return "?";
+}
+
 void Eyes::showTemperature(float temp, float humidity) {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_logisoso24_tr);

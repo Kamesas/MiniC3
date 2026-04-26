@@ -20,7 +20,13 @@
 #include "Eyes.h"
 #include "Button.h"
 #include "TemperatureSensor.h"
+#include "TemperatureHistory.h"
+#include "WebDashboard.h"
 #include "secrets.h"  // WIFI_SSID / WIFI_PASSWORD / TIMEZONE
+
+// Hostname used for both mDNS (http://miniC3.local/) and the WiFi
+// station name visible in the router's client list.
+static constexpr const char* HOSTNAME = "miniC3";
 
 // Pin assignments for the LOLIN C3 Mini.
 // "constexpr" means "constant known at compile time". It's the modern
@@ -59,12 +65,18 @@ constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 10UL * 1000UL;
 // plenty - the clock only shows HH:MM, no seconds.
 constexpr unsigned long CLOCK_REFRESH_MS = 1000UL;
 
+// How often to record a sample to the temperature history ring buffer.
+// 60 seconds * 60 slots = exactly one hour of history.
+constexpr unsigned long HISTORY_SAMPLE_MS = 60UL * 1000UL;
+
 // Create one instance of each module. Because they live outside any
 // function they are "global" objects: they exist for the whole life of
 // the program and are constructed before setup() runs.
-Eyes              eyes(OLED_SDA, OLED_SCL);
-Button            button(BUTTON_PIN);
-TemperatureSensor sensor(DHT_PIN, DHT11);
+Eyes               eyes(OLED_SDA, OLED_SCL);
+Button             button(BUTTON_PIN);
+TemperatureSensor  sensor(DHT_PIN, DHT11);
+TemperatureHistory history;
+WebDashboard       dashboard(sensor, history, eyes);
 
 // When (in millis since boot) to stop showing the temperature and go
 // back to the animated face.
@@ -89,6 +101,9 @@ bool wifiOk = false;
 // When we last refreshed the clock string handed to Eyes.
 unsigned long lastClockRefreshMs = 0;
 
+// When we last recorded a sample into the history ring buffer.
+unsigned long lastHistorySampleMs = 0;
+
 // Try to connect to WiFi, returning true on success. Blocks for up to
 // WIFI_CONNECT_TIMEOUT_MS - if the router is off or the credentials
 // are wrong we give up and run without a clock instead of hanging.
@@ -97,6 +112,7 @@ static bool connectWifi() {
     Serial.flush();
 
     WiFi.mode(WIFI_STA);                       // STA = station = client mode
+    WiFi.setHostname(HOSTNAME);                // shows up in router DHCP list
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     unsigned long start = millis();
@@ -142,6 +158,7 @@ void setup() {
     wifiOk = connectWifi();
     if (wifiOk) {
         startNtp();
+        dashboard.begin(HOSTNAME);
     }
 
     lastInteractionMs = millis();      // start the idle countdown now
@@ -158,9 +175,14 @@ void loop() {
         lastHeartbeat = now;
     }
 
+    // Service the web dashboard. Cheap if no client is connected.
+    if (wifiOk) {
+        dashboard.handleClient();
+    }
+
     // Refresh the clock text shown above the eyes. Cheap operation -
-    // just formats the system clock into "HH:MM" and hands it to Eyes.
-    // Skipped entirely if WiFi never connected.
+    // just formats the system clock into "HH:MM" and hands it to Eyes
+    // (and the web dashboard). Skipped entirely if WiFi never connected.
     if (wifiOk && (now - lastClockRefreshMs > CLOCK_REFRESH_MS)) {
         struct tm timeinfo;
         // getLocalTime() returns false until the first NTP sync lands.
@@ -170,8 +192,19 @@ void loop() {
             snprintf(hhmm, sizeof(hhmm), "%02d:%02d",
                      timeinfo.tm_hour, timeinfo.tm_min);
             eyes.setClock(hhmm);
+            dashboard.setClock(hhmm);
         }
         lastClockRefreshMs = now;
+    }
+
+    // Append a fresh sample to the history ring buffer once a minute.
+    // sensor.poll() does the actual DHT read; readTemperature() then
+    // returns the cached value with no extra I/O. This keeps the chart
+    // on the dashboard moving even when nobody is pressing the button.
+    if (now - lastHistorySampleMs > HISTORY_SAMPLE_MS) {
+        sensor.poll();
+        history.recordSample(sensor.readTemperature(), sensor.readHumidity());
+        lastHistorySampleMs = now;
     }
 
     // 1. If the user pressed the button, mark the interaction (resets
