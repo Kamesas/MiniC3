@@ -49,6 +49,12 @@ public:
     // Turn the OLED panel back on. Pair with sleep().
     void wake();
 
+    // Set the small clock string drawn in the top yellow strip above
+    // the eyes. Pass an empty string ("") to hide the clock (e.g. when
+    // WiFi/NTP isn't ready yet). Typical input is "HH:MM" - up to 6
+    // characters fit comfortably.
+    void setClock(const char* hhmm);
+
 // Everything below "private:" is internal to the class - other files
 // can't touch it. This keeps the public surface small and tidy.
 private:
@@ -97,4 +103,9 @@ private:
     Mood currentMood;
     EyeParams leftEye;
     EyeParams rightEye;
+
+    // Latest clock text to draw above the eyes. Empty string = no clock.
+    // Sized to hold "HH:MM" plus a couple of spare characters and the
+    // C-string null terminator.
+    char clockText[8];
 };

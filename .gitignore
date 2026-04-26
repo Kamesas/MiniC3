@@ -3,3 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# WiFi / API credentials. Real values live in include/secrets.h
+# (kept out of git). Use include/secrets.h.example as a template.
+include/secrets.h

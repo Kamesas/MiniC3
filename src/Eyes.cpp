@@ -21,7 +21,9 @@ Eyes::Eyes(uint8_t sdaPin, uint8_t sclPin)
       targetLookX(0), targetLookY(0),
       currentMood(Normal),
       leftEye{36, 36, 8, 0, 0},
-      rightEye{36, 36, 8, 0, 0} {}
+      rightEye{36, 36, 8, 0, 0} {
+    clockText[0] = '\0';  // start hidden until main.cpp sets a time
+}
 
 void Eyes::begin() {
     u8g2.begin();
@@ -126,6 +128,16 @@ void Eyes::drawFace() {
     drawEye(32, 32, leftEye, lookX, lookY, isBlinking);
     drawEye(96, 32, rightEye, lookX, lookY, isBlinking);
 
+    // Clock at the top, between the eyes. The dual-color OLED panel
+    // shows pixels in the top 16 rows as yellow and the rest as blue,
+    // so the clock will appear in yellow. Only draw when we have a
+    // value to show (empty string = WiFi/NTP not ready).
+    if (clockText[0] != '\0') {
+        u8g2.setFont(u8g2_font_5x7_tn);  // 5x7 px digits-and-colon font
+        int w = u8g2.getStrWidth(clockText);
+        u8g2.drawStr((128 - w) / 2, 7, clockText);
+    }
+
     u8g2.sendBuffer();  // push the in-RAM frame buffer to the screen
 }
 
@@ -173,6 +185,15 @@ void Eyes::sleep() {
 
 void Eyes::wake() {
     u8g2.setPowerSave(0);
+}
+
+// Copy at most sizeof(clockText)-1 characters so we always leave room
+// for the null terminator. strncpy + manual null termination is the
+// safe idiom in C - strncpy alone won't terminate if the source is
+// longer than the destination buffer.
+void Eyes::setClock(const char* hhmm) {
+    strncpy(clockText, hhmm, sizeof(clockText) - 1);
+    clockText[sizeof(clockText) - 1] = '\0';
 }
 
 void Eyes::showTemperature(float temp, float humidity) {

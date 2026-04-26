@@ -15,9 +15,12 @@
 #ifndef DISPLAY_TEST
 
 #include <Arduino.h>
+#include <WiFi.h>     // ESP32 WiFi client (built in to the framework)
+#include <time.h>     // configTzTime, getLocalTime, struct tm
 #include "Eyes.h"
 #include "Button.h"
 #include "TemperatureSensor.h"
+#include "secrets.h"  // WIFI_SSID / WIFI_PASSWORD / TIMEZONE
 
 // Pin assignments for the LOLIN C3 Mini.
 // "constexpr" means "constant known at compile time". It's the modern
@@ -47,6 +50,15 @@ constexpr unsigned long IDLE_SLEEP_MS = 2UL * 60UL * 1000UL;
 // (no "loading..." flash) without hammering the DHT11.
 constexpr unsigned long BACKGROUND_POLL_MS = 30UL * 1000UL;
 
+// How long to keep trying WiFi at boot before giving up. We'd rather
+// have a working thermometer with no clock than a device that hangs
+// in setup() because the router is off.
+constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 10UL * 1000UL;
+
+// How often to refresh the displayed clock string. Once a second is
+// plenty - the clock only shows HH:MM, no seconds.
+constexpr unsigned long CLOCK_REFRESH_MS = 1000UL;
+
 // Create one instance of each module. Because they live outside any
 // function they are "global" objects: they exist for the whole life of
 // the program and are constructed before setup() runs.
@@ -69,6 +81,50 @@ bool displayAsleep = false;
 // When the background DHT poll last ran (only ticks while awake).
 unsigned long lastBackgroundPollMs = 0;
 
+// True once WiFi connected at boot. If false we never try to read the
+// clock (the system time would just be 1970 and the display would be
+// confusing). WiFi failure isn't fatal - the rest of the device works.
+bool wifiOk = false;
+
+// When we last refreshed the clock string handed to Eyes.
+unsigned long lastClockRefreshMs = 0;
+
+// Try to connect to WiFi, returning true on success. Blocks for up to
+// WIFI_CONNECT_TIMEOUT_MS - if the router is off or the credentials
+// are wrong we give up and run without a clock instead of hanging.
+static bool connectWifi() {
+    Serial.printf("WiFi: connecting to %s ...\n", WIFI_SSID);
+    Serial.flush();
+
+    WiFi.mode(WIFI_STA);                       // STA = station = client mode
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED &&
+           millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+        delay(250);
+        Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi: connect FAILED, continuing without clock");
+        return false;
+    }
+    Serial.print("WiFi: connected, IP = ");
+    Serial.println(WiFi.localIP());
+    return true;
+}
+
+// Configure the system clock to sync from NTP servers, applying our
+// timezone. The ESP32's lwIP SNTP client runs in the background -
+// the first sync usually completes within a few seconds of WiFi up.
+static void startNtp() {
+    // 1st arg = POSIX TZ string (DST rules, offsets); 2nd/3rd = NTP servers.
+    configTzTime(TIMEZONE, "pool.ntp.org", "time.nist.gov");
+    Serial.println("NTP: sync started");
+}
+
 void setup() {
     Serial.begin(115200);
     delay(500);
@@ -80,6 +136,14 @@ void setup() {
     sensor.begin();
     Serial.println("eyes.begin()");    Serial.flush();
     eyes.begin();
+
+    // WiFi + NTP. Both are best-effort - on failure the device still
+    // runs as a normal thermometer, just without a clock display.
+    wifiOk = connectWifi();
+    if (wifiOk) {
+        startNtp();
+    }
+
     lastInteractionMs = millis();      // start the idle countdown now
     Serial.println("setup done");      Serial.flush();
 }
@@ -92,6 +156,22 @@ void loop() {
     if (now - lastHeartbeat > 1000) {
         Serial.println("loop alive");
         lastHeartbeat = now;
+    }
+
+    // Refresh the clock text shown above the eyes. Cheap operation -
+    // just formats the system clock into "HH:MM" and hands it to Eyes.
+    // Skipped entirely if WiFi never connected.
+    if (wifiOk && (now - lastClockRefreshMs > CLOCK_REFRESH_MS)) {
+        struct tm timeinfo;
+        // getLocalTime() returns false until the first NTP sync lands.
+        // Pass timeout=0 so it never blocks - we'll just try again next tick.
+        if (getLocalTime(&timeinfo, 0)) {
+            char hhmm[6];
+            snprintf(hhmm, sizeof(hhmm), "%02d:%02d",
+                     timeinfo.tm_hour, timeinfo.tm_min);
+            eyes.setClock(hhmm);
+        }
+        lastClockRefreshMs = now;
     }
 
     // 1. If the user pressed the button, mark the interaction (resets
