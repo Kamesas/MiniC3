@@ -3,6 +3,7 @@
 #include "WebDashboard.h"
 #include "TemperatureSensor.h"
 #include "TemperatureHistory.h"
+#include "DailyStats.h"
 #include "Eyes.h"
 
 #include <ESPmDNS.h>
@@ -33,13 +34,23 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
   .row { display: flex; justify-content: space-between; align-items: baseline; }
   .big { font-size: 2.6em; font-weight: 200; line-height: 1; }
   .label { color: #888; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; }
+  .hilo { font-size: 0.85em; color: #aaa; margin-top: 0.4em; }
+  .hilo .hi { color: #ff7c7c; margin-right: 0.6em; }
+  .hilo .lo { color: #7cb6ff; }
   .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5em 1em; }
   .meta div .v { font-size: 1.1em; font-weight: 500; margin-top: 0.2em; }
-  svg { width: 100%; height: 110px; display: block; margin-top: 0.6em; }
+  svg { width: 100%; height: 90px; display: block; margin-top: 0.6em; }
   .axis { stroke: #333; stroke-width: 1; }
-  .line { fill: none; stroke: #4a9eff; stroke-width: 1.6; }
-  .area { fill: rgba(74,158,255,0.12); stroke: none; }
-  .stale { color: #f55; }
+  .lineT { fill: none; stroke: #4a9eff; stroke-width: 1.6; }
+  .areaT { fill: rgba(74,158,255,0.12); stroke: none; }
+  .lineH { fill: none; stroke: #4ade80; stroke-width: 1.6; }
+  .areaH { fill: rgba(74,222,128,0.12); stroke: none; }
+  table.legend { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+  table.legend th { color: #888; font-weight: 500; text-align: left;
+                    padding: 0.3em 0.4em; border-bottom: 1px solid #333; }
+  table.legend td { padding: 0.4em; }
+  table.legend tr.active td { background: #2c3a4a; color: #fff;
+                              border-radius: 6px; font-weight: 500; }
 </style>
 </head>
 <body>
@@ -49,25 +60,63 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!doctype html>
     <div>
       <div class="label">Temperature</div>
       <div class="big" id="temp">&mdash;</div>
+      <div class="hilo">
+        <span class="hi">&uarr; <span id="tMax">&mdash;</span></span>
+        <span class="lo">&darr; <span id="tMin">&mdash;</span></span>
+      </div>
     </div>
     <div style="text-align:right">
       <div class="label">Humidity</div>
       <div class="big" id="hum">&mdash;</div>
+      <div class="hilo">
+        <span class="hi">&uarr; <span id="hMax">&mdash;</span></span>
+        <span class="lo">&darr; <span id="hMin">&mdash;</span></span>
+      </div>
     </div>
   </div>
 </div>
 <div class="card">
   <div class="label">Last hour &mdash; temperature</div>
-  <svg id="chart" viewBox="0 0 60 100" preserveAspectRatio="none">
+  <svg viewBox="0 0 60 100" preserveAspectRatio="none">
     <line class="axis" x1="0" y1="50" x2="60" y2="50"/>
-    <path class="area" id="area"/>
-    <polyline class="line" id="line"/>
+    <path class="areaT" id="areaT"/>
+    <polyline class="lineT" id="lineT"/>
+  </svg>
+</div>
+<div class="card">
+  <div class="label">Last hour &mdash; humidity</div>
+  <svg viewBox="0 0 60 100" preserveAspectRatio="none">
+    <line class="axis" x1="0" y1="50" x2="60" y2="50"/>
+    <path class="areaH" id="areaH"/>
+    <polyline class="lineH" id="lineH"/>
   </svg>
 </div>
 <div class="card meta">
   <div><div class="label">Time</div><div class="v" id="time">&mdash;</div></div>
   <div><div class="label">Mood</div><div class="v" id="mood">&mdash;</div></div>
   <div><div class="label">Uptime</div><div class="v" id="uptime">&mdash;</div></div>
+</div>
+<div class="card">
+  <div class="row" style="align-items:center">
+    <div style="min-width:4em">
+      <div class="label">Battery</div>
+      <div class="big" id="bat">&mdash;</div>
+    </div>
+    <div style="flex:1;margin-left:1.2em">
+      <div style="background:#333;border-radius:99px;height:10px;overflow:hidden">
+        <div id="bat-bar" style="height:10px;border-radius:99px;width:0%;transition:width 0.6s"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="card">
+  <div class="label">How the eyes pick a mood</div>
+  <table class="legend">
+    <tr><th>Temperature</th><th>Mood</th><th>Why</th></tr>
+    <tr id="m-cold"><td>&lt; 20&deg;C</td><td>Surprised</td><td>cold</td></tr>
+    <tr id="m-comfy"><td>20 &ndash; 28&deg;C</td><td>Happy</td><td>comfy</td></tr>
+    <tr id="m-hot"><td>&gt; 28&deg;C</td><td>Sleepy</td><td>hot</td></tr>
+  </table>
 </div>
 <script>
 const $ = id => document.getElementById(id);
@@ -76,30 +125,55 @@ function fmtUptime(s) {
   if (s < 3600) return Math.floor(s/60) + "m";
   return Math.floor(s/3600) + "h " + Math.floor((s%3600)/60) + "m";
 }
+function fmtNum(v, dec, suffix) {
+  return v == null ? "—" : v.toFixed(dec) + (suffix || "");
+}
+// Render a sparkline into the given <polyline>/<path> pair.
+// `history` is an array (oldest first) of numbers or nulls.
+function renderChart(lineEl, areaEl, history) {
+  const N = 60;
+  const padded = new Array(N - history.length).fill(null).concat(history);
+  const valid = padded.filter(v => v != null);
+  if (valid.length < 2) { lineEl.setAttribute('points',''); areaEl.setAttribute('d',''); return; }
+  const lo = Math.min(...valid) - 0.3;
+  const hi = Math.max(...valid) + 0.3;
+  const range = hi - lo || 1;
+  const pts = [];
+  padded.forEach((v, i) => {
+    if (v != null) pts.push(i + ',' + (100 - (v - lo) / range * 100));
+  });
+  lineEl.setAttribute('points', pts.join(' '));
+  const first = pts[0].split(',')[0], last = pts[pts.length-1].split(',')[0];
+  areaEl.setAttribute('d', 'M' + first + ',100 L' + pts.join(' L') + ' L' + last + ',100 Z');
+}
+function highlightMood(temp) {
+  ['m-cold','m-comfy','m-hot'].forEach(id => $(id).classList.remove('active'));
+  if (temp == null) return;
+  if (temp < 20)      $('m-cold').classList.add('active');
+  else if (temp > 28) $('m-hot').classList.add('active');
+  else                $('m-comfy').classList.add('active');
+}
 async function refresh() {
   let d;
   try { d = await (await fetch('/data')).json(); }
   catch (e) { document.title = "MiniC3 (offline)"; return; }
   document.title = "MiniC3";
-  $('temp').textContent = d.temp == null ? "—" : d.temp.toFixed(1) + "°";
-  $('hum').textContent  = d.humidity == null ? "—" : d.humidity.toFixed(0) + "%";
+  $('temp').textContent = fmtNum(d.temp, 1, "°");
+  $('hum').textContent  = fmtNum(d.humidity, 0, "%");
+  $('tMin').textContent = fmtNum(d.today.temp_min, 1, "°");
+  $('tMax').textContent = fmtNum(d.today.temp_max, 1, "°");
+  $('hMin').textContent = fmtNum(d.today.humidity_min, 0, "%");
+  $('hMax').textContent = fmtNum(d.today.humidity_max, 0, "%");
   $('time').textContent = d.time || "—";
   $('mood').textContent = d.mood || "—";
   $('uptime').textContent = fmtUptime(d.uptime_s);
-  // Chart: pad the array on the LEFT with nulls so the newest sample is at x=59
-  const N = 60, h = d.history;
-  const padded = new Array(N - h.length).fill(null).concat(h);
-  const valid = padded.filter(v => v != null);
-  if (valid.length < 2) { $('line').setAttribute('points', ''); $('area').setAttribute('d', ''); return; }
-  const lo = Math.min(...valid) - 0.3, hi = Math.max(...valid) + 0.3, range = hi - lo || 1;
-  const pts = [];
-  padded.forEach((v, i) => { if (v != null) pts.push(i + ',' + (100 - (v - lo) / range * 100)); });
-  $('line').setAttribute('points', pts.join(' '));
-  // Area underneath the line for a nicer look
-  if (pts.length) {
-    const first = pts[0].split(',')[0], last = pts[pts.length-1].split(',')[0];
-    $('area').setAttribute('d', 'M' + first + ',100 L' + pts.join(' L') + ' L' + last + ',100 Z');
-  }
+  renderChart($('lineT'), $('areaT'), d.history_t);
+  renderChart($('lineH'), $('areaH'), d.history_h);
+  highlightMood(d.temp);
+  $('bat').textContent = d.battery != null ? d.battery + '%' : '—';
+  const bar = $('bat-bar');
+  bar.style.width = (d.battery || 0) + '%';
+  bar.style.background = d.battery != null && d.battery <= 20 ? '#ff7c7c' : '#4ade80';
 }
 refresh();
 setInterval(refresh, 5000);
@@ -109,8 +183,10 @@ setInterval(refresh, 5000);
 
 WebDashboard::WebDashboard(TemperatureSensor& sensor,
                            TemperatureHistory& history,
+                           DailyStats& daily,
                            Eyes& eyes)
-    : sensor_(sensor), history_(history), eyes_(eyes), server_(80) {}
+    : sensor_(sensor), history_(history), daily_(daily), eyes_(eyes),
+      server_(80), batteryPercent_(-1) {}
 
 void WebDashboard::begin(const char* hostname) {
     if (!MDNS.begin(hostname)) {
@@ -135,6 +211,10 @@ void WebDashboard::handleClient() {
 
 void WebDashboard::setClock(const char* hhmm) {
     currentClock_ = hhmm;
+}
+
+void WebDashboard::setBattery(int percent) {
+    batteryPercent_ = percent;
 }
 
 void WebDashboard::handleRoot() {
@@ -169,13 +249,34 @@ void WebDashboard::handleData() {
     json += eyes_.getMoodName();
     json += "\",\"uptime_s\":";
     json += String(millis() / 1000UL);
-    json += ",\"history\":[";
+    json += ",\"battery\":";
+    if (batteryPercent_ < 0) json += "null";
+    else json += String(batteryPercent_);
 
-    // Only include real samples (count() of them, oldest first). The
-    // browser knows to right-align the array onto the chart's 60 slots.
+    // Today's high/low for both metrics. NaN -> JSON null so the JS
+    // can show "—" until at least one sample lands today.
+    json += ",\"today\":{\"temp_min\":";
+    appendNumberOrNull(daily_.tempMin(), 1);
+    json += ",\"temp_max\":";
+    appendNumberOrNull(daily_.tempMax(), 1);
+    json += ",\"humidity_min\":";
+    appendNumberOrNull(daily_.humidityMin(), 0);
+    json += ",\"humidity_max\":";
+    appendNumberOrNull(daily_.humidityMax(), 0);
+    json += "}";
+
+    // Two history arrays - temperature and humidity. Both are oldest-
+    // first, only count() entries; the browser pads the left side
+    // with nulls so the newest sample sits at x=59.
+    json += ",\"history_t\":[";
     for (size_t i = 0; i < history_.count(); i++) {
         if (i > 0) json += ',';
         appendNumberOrNull(history_.tempAt(i), 1);
+    }
+    json += "],\"history_h\":[";
+    for (size_t i = 0; i < history_.count(); i++) {
+        if (i > 0) json += ',';
+        appendNumberOrNull(history_.humidityAt(i), 0);
     }
     json += "]}";
 

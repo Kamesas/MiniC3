@@ -55,6 +55,10 @@ public:
     // characters fit comfortably.
     void setClock(const char* hhmm);
 
+    // Update the battery percentage shown in the top-right corner of
+    // every screen. Pass -1 (the default) to hide the indicator.
+    void setBattery(int percent);
+
     // Human-readable name of the current mood ("Normal", "Happy", etc.).
     // Used by the web dashboard for display.
     const char* getMoodName() const;
@@ -91,7 +95,6 @@ private:
     unsigned long nextBlink;
     unsigned long blinkUntil;
     unsigned long nextLook;
-    unsigned long nextMood;
 
     bool isBlinking;
 
@@ -112,4 +115,7 @@ private:
     // Sized to hold "HH:MM" plus a couple of spare characters and the
     // C-string null terminator.
     char clockText[8];
+
+    // -1 = not yet known (indicator hidden). 0-100 = battery percent.
+    int batteryPercent;
 };

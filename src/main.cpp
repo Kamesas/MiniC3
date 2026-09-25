@@ -21,6 +21,7 @@
 #include "Button.h"
 #include "TemperatureSensor.h"
 #include "TemperatureHistory.h"
+#include "DailyStats.h"
 #include "WebDashboard.h"
 #include "secrets.h"  // WIFI_SSID / WIFI_PASSWORD / TIMEZONE
 
@@ -37,8 +38,11 @@ constexpr uint8_t DHT_PIN    = 1;
 // pulled LOW at reset the chip enters download mode and never runs
 // the sketch.)
 constexpr uint8_t BUTTON_PIN = 3;
-constexpr uint8_t OLED_SDA   = 5;
-constexpr uint8_t OLED_SCL   = 6;
+constexpr uint8_t OLED_SDA    = 5;
+constexpr uint8_t OLED_SCL    = 6;
+// Voltage divider (100kΩ + 100kΩ) from TP4056 B+ to GND, midpoint here.
+// Scales 4.2V → 2.1V, safely within the ESP32-C3 ADC range.
+constexpr uint8_t BATTERY_PIN = 0;
 
 // How long to keep showing the temperature after the button is pressed.
 constexpr unsigned long SHOW_TEMPERATURE_MS = 5000;
@@ -69,6 +73,17 @@ constexpr unsigned long CLOCK_REFRESH_MS = 1000UL;
 // 60 seconds * 60 slots = exactly one hour of history.
 constexpr unsigned long HISTORY_SAMPLE_MS = 60UL * 1000UL;
 
+// Battery voltage is stable, so 30 seconds is more than frequent enough.
+constexpr unsigned long BATTERY_READ_MS = 30UL * 1000UL;
+
+// Set to true once the voltage divider is wired to BATTERY_PIN.
+// While false the battery indicator is hidden everywhere.
+constexpr bool BATTERY_WIRED = false;
+
+// Set to false to skip WiFi entirely (saves ~70 mA and removes the
+// 10-second connect timeout at boot).
+constexpr bool WIFI_ENABLED = false;
+
 // Create one instance of each module. Because they live outside any
 // function they are "global" objects: they exist for the whole life of
 // the program and are constructed before setup() runs.
@@ -76,7 +91,8 @@ Eyes               eyes(OLED_SDA, OLED_SCL);
 Button             button(BUTTON_PIN);
 TemperatureSensor  sensor(DHT_PIN, DHT11);
 TemperatureHistory history;
-WebDashboard       dashboard(sensor, history, eyes);
+DailyStats         daily;
+WebDashboard       dashboard(sensor, history, daily, eyes);
 
 // When (in millis since boot) to stop showing the temperature and go
 // back to the animated face.
@@ -103,6 +119,9 @@ unsigned long lastClockRefreshMs = 0;
 
 // When we last recorded a sample into the history ring buffer.
 unsigned long lastHistorySampleMs = 0;
+
+// When we last read the battery ADC.
+unsigned long lastBatteryReadMs = 0;
 
 // Try to connect to WiFi, returning true on success. Blocks for up to
 // WIFI_CONNECT_TIMEOUT_MS - if the router is off or the credentials
@@ -132,6 +151,19 @@ static bool connectWifi() {
     return true;
 }
 
+// Average 8 ADC samples to reduce noise, then map the voltage divider
+// output back to full battery voltage and return 0-100%.
+// LiPo range: 3.0V (empty) .. 4.2V (full).
+static int readBatteryPercent() {
+    analogSetPinAttenuation(BATTERY_PIN, ADC_11db);  // full 0-3.3V range
+    long sum = 0;
+    for (int i = 0; i < 8; i++) sum += analogRead(BATTERY_PIN);
+    float vadc = (sum / 8.0f) / 4095.0f * 3.3f;
+    float vbat = vadc * 2.0f;  // undo the 100k+100k divider
+    int pct = (int)((vbat - 3.0f) / (4.2f - 3.0f) * 100.0f);
+    return constrain(pct, 0, 100);
+}
+
 // Configure the system clock to sync from NTP servers, applying our
 // timezone. The ESP32's lwIP SNTP client runs in the background -
 // the first sync usually completes within a few seconds of WiFi up.
@@ -155,10 +187,12 @@ void setup() {
 
     // WiFi + NTP. Both are best-effort - on failure the device still
     // runs as a normal thermometer, just without a clock display.
-    wifiOk = connectWifi();
-    if (wifiOk) {
-        startNtp();
-        dashboard.begin(HOSTNAME);
+    if (WIFI_ENABLED) {
+        wifiOk = connectWifi();
+        if (wifiOk) {
+            startNtp();
+            dashboard.begin(HOSTNAME);
+        }
     }
 
     lastInteractionMs = millis();      // start the idle countdown now
@@ -171,8 +205,20 @@ void loop() {
 
     // Print "alive" once per second so we can see if loop() is running.
     if (now - lastHeartbeat > 1000) {
-        Serial.println("loop alive");
+        Serial.printf("loop alive | chip temp: %.1f C | btn pin %d raw: %s\n",
+                      temperatureRead(),
+                      BUTTON_PIN,
+                      digitalRead(BUTTON_PIN) == LOW ? "LOW (pressed)" : "HIGH (open)");
         lastHeartbeat = now;
+    }
+
+    // Read battery voltage and push to both Eyes and WebDashboard.
+    if (BATTERY_WIRED && now - lastBatteryReadMs > BATTERY_READ_MS) {
+        int pct = readBatteryPercent();
+        Serial.printf("battery: %d%%\n", pct);
+        eyes.setBattery(pct);
+        if (wifiOk) dashboard.setBattery(pct);
+        lastBatteryReadMs = now;
     }
 
     // Service the web dashboard. Cheap if no client is connected.
@@ -201,9 +247,27 @@ void loop() {
     // sensor.poll() does the actual DHT read; readTemperature() then
     // returns the cached value with no extra I/O. This keeps the chart
     // on the dashboard moving even when nobody is pressing the button.
+    // We also feed the same reading into the daily high/low tracker -
+    // but only when NTP has told us what day it is, otherwise we'd
+    // record into "day -1" and the stats would reset on first sync.
     if (now - lastHistorySampleMs > HISTORY_SAMPLE_MS) {
         sensor.poll();
-        history.recordSample(sensor.readTemperature(), sensor.readHumidity());
+        float t = sensor.readTemperature();
+        float h = sensor.readHumidity();
+        history.recordSample(t, h);
+
+        // Keep the displayed mood in sync with the room - the eyes no
+        // longer pick a random mood on their own (see Eyes::update).
+        if (!isnan(t)) {
+            eyes.setMoodFromTemperature(t);
+        }
+
+        if (wifiOk) {
+            struct tm timeinfo;
+            if (getLocalTime(&timeinfo, 0)) {
+                daily.recordSample(t, h, timeinfo.tm_yday);
+            }
+        }
         lastHistorySampleMs = now;
     }
 
@@ -230,7 +294,7 @@ void loop() {
         float humidity = sensor.readHumidity();
         Serial.printf("temp branch: t=%.1f h=%.1f\n", temp, humidity);
 
-        if (!isnan(temp) && !isnan(humidity)) {
+        if (!isnan(temp) && !isnan(humidity) && temp > 1.0f && humidity > 0.0f) {
             eyes.showTemperature(temp, humidity);
             // Pre-set the mood so when we return to the face, it
             // reflects the temperature we just measured.

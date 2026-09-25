@@ -15,13 +15,13 @@ Eyes::Eyes(uint8_t sdaPin, uint8_t sclPin)
       nextBlink(0),
       blinkUntil(0),
       nextLook(0),
-      nextMood(0),
       isBlinking(false),
       lookX(0), lookY(0),
       targetLookX(0), targetLookY(0),
       currentMood(Normal),
       leftEye{36, 36, 8, 0, 0},
-      rightEye{36, 36, 8, 0, 0} {
+      rightEye{36, 36, 8, 0, 0},
+      batteryPercent(-1) {
     clockText[0] = '\0';  // start hidden until main.cpp sets a time
 }
 
@@ -35,7 +35,6 @@ void Eyes::begin() {
     // Schedule the first random animation events a couple of seconds out.
     nextBlink = millis() + random(2000, 4000);
     nextLook  = millis() + random(1000, 3000);
-    nextMood  = millis() + random(5000, 10000);
 }
 
 void Eyes::setMood(Mood mood) {
@@ -63,7 +62,7 @@ void Eyes::setMood(Mood mood) {
 void Eyes::setMoodFromTemperature(float temp) {
     if (temp > 28) {
         setMood(Sleepy);     // sleepy when hot
-    } else if (temp < 18) {
+    } else if (temp < 20) {
         setMood(Surprised);  // surprised when cold
     } else {
         setMood(Happy);      // happy at a comfortable temperature
@@ -115,6 +114,18 @@ void Eyes::drawEye(int centerX, int centerY, EyeParams &eye,
     }
 }
 
+void Eyes::setBattery(int percent) {
+    batteryPercent = percent;
+}
+
+static void drawBatteryIndicator(U8G2& u8g2, int percent) {
+    if (percent < 0) return;
+    char buf[6];
+    snprintf(buf, sizeof(buf), "%d%%", percent);
+    int w = u8g2.getStrWidth(buf);
+    u8g2.drawStr(127 - w, 7, buf);
+}
+
 void Eyes::drawFace() {
     u8g2.clearBuffer();
 
@@ -132,11 +143,12 @@ void Eyes::drawFace() {
     // shows pixels in the top 16 rows as yellow and the rest as blue,
     // so the clock will appear in yellow. Only draw when we have a
     // value to show (empty string = WiFi/NTP not ready).
+    u8g2.setFont(u8g2_font_5x7_tn);  // 5x7 px digits-and-colon font
     if (clockText[0] != '\0') {
-        u8g2.setFont(u8g2_font_5x7_tn);  // 5x7 px digits-and-colon font
         int w = u8g2.getStrWidth(clockText);
         u8g2.drawStr((128 - w) / 2, 7, clockText);
     }
+    drawBatteryIndicator(u8g2, batteryPercent);
 
     u8g2.sendBuffer();  // push the in-RAM frame buffer to the screen
 }
@@ -170,11 +182,9 @@ void Eyes::update() {
         nextLook    = now + random(800, 2500);
     }
 
-    // Random mood changes every 5-15 seconds.
-    if (now > nextMood) {
-        setMood((Mood)random(0, 4));  // cast int -> Mood enum
-        nextMood = now + random(5000, 15000);
-    }
+    // Mood is no longer changed at random here - it's driven by the
+    // current temperature from main.cpp (see setMoodFromTemperature),
+    // so the dashboard's mood legend always tells the truth.
 
     drawFace();
 }
@@ -228,6 +238,9 @@ void Eyes::showTemperature(float temp, float humidity) {
     snprintf(humStr, sizeof(humStr), "%.0f%%", humidity);
     int humWidth = u8g2.getStrWidth(humStr);
     u8g2.drawStr((128 - humWidth) / 2, 55, humStr);
+
+    u8g2.setFont(u8g2_font_5x7_tn);
+    drawBatteryIndicator(u8g2, batteryPercent);
 
     u8g2.sendBuffer();
 }

@@ -18,15 +18,17 @@
 // compile times fast and reduces unnecessary header coupling.
 class TemperatureSensor;
 class TemperatureHistory;
+class DailyStats;
 class Eyes;
 
 class WebDashboard {
 public:
-    // The dashboard reads (but does not own) these three modules.
+    // The dashboard reads (but does not own) these four modules.
     // References are used instead of pointers because they can never
     // be null and never change after construction.
     WebDashboard(TemperatureSensor& sensor,
                  TemperatureHistory& history,
+                 DailyStats& daily,
                  Eyes& eyes);
 
     // Start the HTTP server and announce the hostname over mDNS so
@@ -42,6 +44,10 @@ public:
     // gets) so it can include it in /data responses.
     void setClock(const char* hhmm);
 
+    // Update the battery percentage included in /data responses.
+    // Pass -1 to omit the field (shown as null in JSON).
+    void setBattery(int percent);
+
 private:
     // HTTP request handlers.
     void handleRoot();   // GET /        -> the HTML page
@@ -49,8 +55,10 @@ private:
 
     TemperatureSensor&  sensor_;
     TemperatureHistory& history_;
+    DailyStats&         daily_;
     Eyes&               eyes_;
 
     WebServer server_;
     String currentClock_;  // "HH:MM" or empty if NTP not yet ready
+    int batteryPercent_;   // -1 = unknown
 };
